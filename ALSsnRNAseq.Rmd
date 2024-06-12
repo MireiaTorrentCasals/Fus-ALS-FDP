@@ -1,0 +1,1099 @@
+---
+title: 'ALS snRNAseq: Data analysis after data integration'
+author: "Mireia Torrent Casals"
+date: "2024-04-18"
+output: 
+  prettydoc::html_pretty:
+    theme: leonids
+    toc: yes
+---
+## 1.Load the integrated Seurat object
+
+```{r echo=TRUE, results='hide'}
+library(Seurat)
+library(SeuratObject)
+library(tidyverse)
+library(Matrix)
+library(kableExtra)
+library(cowplot)
+library(patchwork)
+library(gridExtra)
+library(RColorBrewer)
+library(clusterProfiler)
+library(org.Mm.eg.db)
+```
+
+
+```{r}
+#load the integrated seurat object
+seurat_object<- readRDS("/mbshome/mtorrent/ALS-FUS/seurat_int.rds")
+samples <- c("WT","MyoDicre","FusdNLS","FusdNLS_MyoDicre")
+
+#check seurat object
+rownames(seurat_object[1:5])
+
+```
+
+I have to use two methods in order to integrate the data:
+
+Canonical Correlation Analysis (cca) <- analyze the relationship between two sets of variables. Is employed to integrate multiple datasets derived from different experimental conditions (in this case the 4 different samples that we have)
+
+Harmony Integration <- Designed for batch correction. It is used to remove unwanted variation(often caused by batch effects)from the data, allowing more accurate and robust downstream analyses 
+
+```{r echo=TRUE, results='hide'}
+#I have to run again the FindNeighbors, FindClusters and RunUMAP functions on both integrations (CCA and Harmony)
+ 
+seurat_object <- FindNeighbors(seurat_object, reduction = "integrated.cca", dims = 1:20)
+seurat_object <- FindNeighbors(seurat_object, reduction = "harmony", dims = 1:20)
+```
+
+```{r}
+seurat_object <- FindClusters(seurat_object, resolution = 0.5, cluster.name = "cca.clusters") 
+seurat_object <- FindClusters(seurat_object, resolution = 0.5, cluster.name = "harmony.clusters")
+```
+
+```{r}
+seurat_object <- RunUMAP(seurat_object, reduction = "integrated.cca", dims = 1:20, reduction.name = "umap.cca")
+seurat_object <- RunUMAP(seurat_object, reduction = "harmony", dims = 1:20, reduction.name = "umap.harmony")
+```
+
+## 2. Nonlinear dimansional reduction (UMAP)
+
+## 2.1 Study the data after cca and harmony integration
+
+
+```{r}
+#make a subset of orig.ident, this makes it easier because it separates the data by distinct groups
+seurat.subset <- SplitObject(seurat_object, split.by = "orig.ident")
+
+#general UMAP visualization after cca and harmony integration
+umap.cca <- DimPlot(seurat_object, reduction = "umap.cca", label = TRUE) + NoLegend()
+umap.harmony <- DimPlot(seurat_object, reduction = "umap.harmony", label = TRUE) + NoLegend()
+
+#UMAP plot colored by "orig.ident"
+umap.cca.samples <- DimPlot(seurat_object, reduction = "umap.cca", group.by = "orig.ident") + NoLegend()
+umap.harmony.samples <- DimPlot(seurat_object, reduction = "umap.harmony", group.by = "orig.ident") + NoLegend()
+
+#Combine the UMAP plots into a single plot grid:
+plot.umap.comb <- grid.arrange(umap.cca,umap.harmony,umap.cca.samples,umap.harmony.samples, ncol = 2)
+
+```
+
+The UMAPs below show how many genes or RNA counts are per cell, unintegrated, cca integration and harmony integration
+
+```{r}
+#UNINTEGRATED
+
+umap.dimplot.list <- list()
+for (i in unique(x=seurat_object$orig.ident)){
+  umap.dimplot.list[[i]] <- DimPlot(seurat_object, cells.highlight = WhichCells(object = seurat_object, expression = orig.ident == i), cols.highlight = "turquoise4", pt.size=0.5)+ NoLegend() + ggtitle(i)
+} 
+plot.dimplot.unIn.comb <- grid.arrange(grobs = umap.dimplot.list, ncol = 2)
+```
+
+In the unintegrated UMAP plot we can see that the sample of WT has an extra cluster with unidentified genes or RNA counts, that is why we integrate the data on the following UMAP plots, because, as we can see, the extra cluster dissapears so it was probably noise related issue or a batch error. 
+
+```{r}
+#CCA INT.
+
+umap.dimplot.list <- list()
+for (i in unique(x=seurat_object$orig.ident)){
+  umap.dimplot.list[[i]] <- DimPlot(seurat_object, reduction = "umap.cca", cells.highlight = WhichCells(object = seurat_object, expression = orig.ident == i), cols.highlight = "turquoise4", pt.size=0.5)+ NoLegend() + ggtitle(i)
+} 
+plot.dimplot.cca.comb <- grid.arrange(grobs = umap.dimplot.list, ncol = 2)
+```
+
+```{r}
+#HARMONY INT
+umap.dimplot.list <- list()
+for (i in unique(x=seurat_object$orig.ident)){
+  umap.dimplot.list[[i]] <- DimPlot(seurat_object, reduction = "umap.harmony", cells.highlight = WhichCells(object = seurat_object, expression = orig.ident == i), cols.highlight = "turquoise4", pt.size=0.5)+ NoLegend() + ggtitle(i)
+} 
+plot.dimplot.unIn.comb <- grid.arrange(grobs = umap.dimplot.list, ncol = 2)
+
+```
+
+
+```{r}
+# make a combined plot between the feature and counts unintegrated and also with cca and harmony methods
+
+plot.features.un <- FeaturePlot(seurat_object, features = "nFeature_RNA", pt.size = 0.5)
+plot.counts.un <- FeaturePlot(seurat_object, features = "nCount_RNA", pt.size = 0.5)
+plot.features.cca <- FeaturePlot(seurat_object, features = "nFeature_RNA", pt.size = 0.5, reduction = "umap.cca")
+plot.features.harmony <- FeaturePlot(seurat_object, features = "nFeature_RNA", pt.size = 0.5, reduction = "umap.harmony")
+
+plot.counts.combined <- grid.arrange(plot.counts.un,plot.features.un,plot.features.cca,plot.features.harmony, ncol = 2)
+```
+
+
+```{r}
+dimensions <- 30
+resolutions <- 1
+
+for (i in dimensions ) {
+  # Run FindNeighbors on data.pca with 
+ data.dim <- FindNeighbors(seurat_object, dims = 1:i)
+  # Run FindClusters and see if the data get assigned to the correct Seurat Object.
+  data.dim <- FindClusters(data.dim, resolution = resolutions)
+ assign(paste0("data.",i), data.dim)
+}
+```
+
+```{r}
+DimPlot(data.30, reduction = "umap.cca", group.by = "RNA_snn_res.1", label = TRUE)
+```
+```{r}
+rm(data.30, data.dim)
+```
+
+## 3 Cluster Biomarkers
+
+## 3.1 Find differentially expressed features
+
+Seurat can help you find markers that define clusters via differential expression. By default, it identifies positive and negative markers of a single cluster (specified in ident.1), compared to all other cells. FindAllMarkers() automates this process for all clusters, but you can also test groups of clusters vs. each other, or against all cells.
+
+There are three main functions:
+
+FindMarkers: a versatile tool for identifying marker genes that are differentially expressed between specified cell clusters or groups. It employs a Wilcoxon rank-sum test by default and allows users to customize parameters for significance and log-fold change thresholds. This function is suitable for a wide range of differential expression analysis scenarios in single-cell RNA-seq data, mainly for comparing two groups within one dataset.
+
+FindAllMarkers: Similarly, it identifies marker genes across all clusters or groups in a Seurat object. It’s useful for a comprehensive exploration of marker genes in the entire dataset. Users can specify the method (e.g., Wilcoxon rank-sum test or t-test) and customize parameters for statistical significance.
+
+FindConservedMarkers: designed to identify markers that are conserved across different datasets or conditions. It helps users discover genes consistently differentially expressed across multiple experimental conditions. This function requires the definition of grouping variables to compare different conditions or datasets.
+
+```{r}
+#find markers for every cluster compared to all remaining cells
+
+seurat_object <- JoinLayers(seurat_object)
+seurat_object
+```
+
+
+## 3.2 Visualizations of the marker feature expression
+```{r}
+#VIOLIN PLOT -> create a violin plot with the most expressed gene markers in order to see their expression in each cluster
+
+VlnPlot(seurat_object, features = c("Zfp385b", "Ptpn3", "Nrp1", "Cd36", "Atp1b1", "Fus", "2310016D03Rik"), log = TRUE, pt.size = 0)
+
+
+#FEATURE PLOT -> Visualize feature expression in low-dimensional spa ce
+
+FeaturePlot(seurat_object, features = c("Zfp385b", "Ptpn3", "Nrp1", "Cd36", "Atp1b1", "Fus", "2310016D03Rik"))
+
+```
+
+## 3.3 Assign Identities for each cluster in the Umap: {.tabset .tabset-fade .tabset-pills} 
+
+Check the markers for each cluster and assign its identities: Based on Petrany's and Dos Santos papers
+
+### NMJ cluster (14)
+```{r}
+
+VlnPlot(seurat_object, features = c("Chrne","Etv5", "Colq"), stack = T, flip = T, pt.size = 0)
+```
+
+
+### Body Myonuclei cluster
+```{r}
+#For general body myonuclei 
+VlnPlot(seurat_object, features = c("Ttn","Enah", "Ckm","Nos1", "Runx1", "Flnc", "Myh9"),stack = T, flip = T, pt.size = 0)
+
+#For Type IIb (clusters 0,4,6)
+VlnPlot(seurat_object, features = "Myh4", log = TRUE, pt.size = 0)
+
+#For type IIx (clustera 1,2,3,5)
+VlnPlot(seurat_object, features = "Myh1", log = TRUE, pt.size = 0)
+```
+
+### MTJ cluster (9)
+```{r}
+VlnPlot(seurat_object, features = c ( "Col22a1", "Col6a3","Adamts20","Maml2"), stack = T, flip = T, pt.size = 0)
+```
+
+### Satellite Cells (MuSC) cluster (11)
+```{r}
+VlnPlot(seurat_object, features = c("Pax7", "Tcf4","Mef2a"),stack = T, flip = T, pt.size = 0)
+```
+
+
+### Endothelial Cells (Cluster 7, 15??)
+```{r}
+VlnPlot(seurat_object, features = c("Pecam1","Flt1", "Eng"), stack = T, flip = T, pt.size = 0)
+```
+
+### Smooth Muscle Cluster 10 (12 and 15?)
+```{r}
+VlnPlot(seurat_object, features = c("Myh11","Mylk","Cald1"), stack = T, flip = T, pt.size = 0)
+```
+
+### FAPs Cluster 8 (and 12??)
+```{r}
+VlnPlot(seurat_object, features =c("Dcn","Cd34"), stack = T, flip = T, pt.size = 0)
+```
+
+
+### Immune Cells (Cluster 13)  
+```{r}
+VlnPlot(seurat_object, features = "Ptprc", log = TRUE, pt.size = 0)
+```
+
+### Adipocytes Cluster 7 and 16
+```{r}
+VlnPlot(seurat_object, features = c("Pparg","Fabp4","Adipor2"),stack = T, flip = T, pt.size = 0)
+```
+
+## Pericytes Cluster 10
+```{r}
+VlnPlot(seurat_object, features = c("Pdgfrb","Rgs5"), stack = T, pt.size = 0,flip = T)
+```
+
+### Tenocytes Cluster 12 and 17 
+```{r}
+VlnPlot(seurat_object, features = c("Col1a1","Col3a1"),stack = T,  pt.size = 0, flip = T)
+```
+
+## Cluster with cell assigned identities:
+
+```{r}
+#replace the labels with true vectors corresponding the 0-17 order
+new.cluster.ids <- c("0_Type IIb M", "1_Type IIx M","2_Type IIx M", "3_Type IIx M", "4_Type IIb M", "5_Type IIx M", "6_Type IIb M", "7_EC+AC", "8_FAPS", "9_MTJ", "10_PC", "11_MuSC", "12_FAP+TC", "13_Immune Cells", "14_NMJ", "15_EC+Smooth MC", "16_AC", "17_TC+AC")
+names(new.cluster.ids) <- levels(seurat_object)
+
+
+seurat_object <- RenameIdents(seurat_object, new.cluster.ids)
+
+DimPlot(seurat_object, reduction = "umap.cca", label = TRUE, pt.size = 0.5) + NoLegend()
+```
+
+
+#3.4 Differentially expressed genes in the body myonuclei cluster using the FindMarkers() function {.tabset .tabset-fade .tabset-pills} 
+After assigning identities in each one of the clusters, and knowing that from cluster 0 to 6 are the ones forming the body myonuclei cluster, I can check the DEG from each one of them using FindMarkers() function. This function is to find markers that are conserved across different groups or conditions. It is useful to find genes consistently expressed in each of the conditions we analyze. It helps to charachterize the unique features of that cluster. First we will see the DGE for the 5 clusters together, then, I will do it separately.
+
+In this function you have to define two types of identities, ident.1 and ident.2. Ident.1 would be the one you analyze and the one that you want to find differential expression between other samples. In this case the ident.1 would be always FusdNLS and the control (ident.2) would be either WT or FusdNLS_MyoDicre. Genes that are upregulated in ident.1 compared to ident.2 will have positive log-fold change values, indicating higher expression in ident.1 relative to ident.2
+
+
+DGE between samples FusdNLS and WT:
+```{r}
+# Filter the clusters of interest (clusters 0 to 6)
+clusters_of_interest <- c("0_Type IIb M", "1_Type IIx M", "2_Type IIx M", "3_Type IIx M", "4_Type IIb M", "5_Type IIx M", "6_Type IIb M")
+table(seurat_object$orig.ident)
+
+Body_myonucleiFusWT <- FindMarkers(seurat_object, ident.1 = "FusdNLS" , ident.2 = "WT", group.by = "orig.ident", logfc.threshold = 0.25, verbose = TRUE, subset.ident = clusters_of_interest)
+
+# Filter for significant DEG, genes with a p-value adjusted below 0.05"
+deg.filtBM<-Body_myonucleiFusWT %>%
+          filter(p_val_adj < 0.05)
+  
+print(head(deg.filtBM))
+    
+    
+```
+Volcano plot
+
+```{r}
+library(ggplot2)
+library(ggrepel)
+
+Body_myonucleiFusWT_df <- as.data.frame(Body_myonucleiFusWT)
+Body_myonucleiFusWT_df$DE_stat <- ifelse(Body_myonucleiFusWT_df$p_val_adj < 0.05 & abs(Body_myonucleiFusWT_df$avg_log2FC) > 0.5, ifelse(Body_myonucleiFusWT_df$avg_log2FC > 0,"Upregulated","Downregulated"),"Not Significant")
+
+# Number of top genes to label
+top_n <- 5
+
+# Select top upregulated and downregulated genes
+top_upregulated <- Body_myonucleiFusWT_df %>%
+  filter(DE_stat == "Upregulated") %>%
+  top_n(n = top_n, wt = avg_log2FC)
+
+top_downregulated <- Body_myonucleiFusWT_df %>%
+  filter(DE_stat == "Downregulated") %>%
+  top_n(n = top_n, wt = -avg_log2FC)
+
+# Combine the top genes
+top_genes <- rbind(top_upregulated, top_downregulated)
+
+# Add labels for these top genes
+Body_myonucleiFusWT_df$label <- ifelse(rownames(Body_myonucleiFusWT_df) %in% rownames(top_genes), rownames(Body_myonucleiFusWT_df), "")
+
+# Create the volcano plot with labels for the most differentially expressed genes
+ggplot(Body_myonucleiFusWT_df, aes(x = avg_log2FC, y = -log10(p_val_adj), color = DE_stat)) +
+  geom_point() +
+  scale_color_manual(values = c("red","gray","blue"), labels = c("Downregulated","Not Significant","Upregulated")) +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "gray") +
+  geom_vline(xintercept = c(-0.5, 0.5), linetype = "dashed", color = "gray") +
+  labs(x = "log2(Fold Change)", y = "-log10(Adjusted p-value)", title = "Volcano Plot for Body Myonuclei clusters between samples FusdNLS and WT") +
+  theme_minimal() +
+  geom_text_repel(aes(label = label), box.padding = 0.35, point.padding = 0.3, max.overlaps = Inf)
+```
+
+
+DGE between samples FusdNLS and FusdNLS_MyoDicre:
+```{r}
+Body_myonucleiFusMyo <- FindMarkers(seurat_object, ident.1 = "FusdNLS" , ident.2 = "FusdNLS_MyoDicre", group.by = "orig.ident", logfc.threshold = 0.25, verbose = TRUE, subset.ident = clusters_of_interest)
+
+deg.filtBM.0<-Body_myonucleiFusMyo %>%
+          filter(p_val_adj < 0.05)
+  
+print(head(deg.filtBM.0))
+```
+
+Print the volcano plot:
+```{r}
+
+Body_myonucleiFusMyo_df <- as.data.frame(Body_myonucleiFusMyo)
+Body_myonucleiFusMyo_df$DE_stat <- ifelse(Body_myonucleiFusMyo_df$p_val_adj < 0.05 & abs(Body_myonucleiFusMyo_df$avg_log2FC) > 0.5, ifelse(Body_myonucleiFusMyo_df$avg_log2FC > 0,"Upregulated","Downregulated"),"Not Significant")
+
+# Number of top genes to label
+top_n <- 5
+
+# Select top upregulated and downregulated genes
+top_upregulated <- Body_myonucleiFusMyo_df %>%
+  filter(DE_stat == "Upregulated") %>%
+  top_n(n = top_n, wt = avg_log2FC)
+
+top_downregulated <- Body_myonucleiFusMyo_df %>%
+  filter(DE_stat == "Downregulated") %>%
+  top_n(n = top_n, wt = -avg_log2FC)
+
+# Combine the top genes
+top_genes <- rbind(top_upregulated, top_downregulated)
+
+# Add labels for these top genes
+Body_myonucleiFusMyo_df$label <- ifelse(rownames(Body_myonucleiFusMyo_df) %in% rownames(top_genes), rownames(Body_myonucleiFusMyo_df), "")
+
+# Create the volcano plot with labels for the most differentially expressed genes
+ggplot(Body_myonucleiFusMyo_df, aes(x = avg_log2FC, y = -log10(p_val_adj), color = DE_stat)) +
+  geom_point() +
+  scale_color_manual(values = c("red","gray","blue"), labels = c("Downregulated","Not Significant","Upregulated")) +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "gray") +
+  geom_vline(xintercept = c(-0.5, 0.5), linetype = "dashed", color = "gray") +
+  labs(x = "log2(Fold Change)", y = "-log10(Adjusted p-value)", title = "Volcano Plot for Body Myonuclei clusters between samples FusdNLS and FusMyoDicre") +
+  theme_minimal() +
+  geom_text_repel(aes(label = label), box.padding = 0.35, point.padding = 0.3, max.overlaps = Inf)
+```
+
+
+
+### 3.4.1 DGE in cluster 0_Type IIb M:
+
+```{r}
+# BETWEEN SAMPLES FusdNLS and WT
+
+O_TypeIIbFusWT <- FindMarkers(seurat_object, ident.1 = "FusdNLS" , ident.2 = "WT", group.by = "orig.ident", logfc.threshold = 0.25, verbose = TRUE, subset.ident = "0_Type IIb M")
+
+deg.filt0TypeIIb<-O_TypeIIbFusWT %>%
+          filter(p_val_adj < 0.05)
+  
+print(head(deg.filt0TypeIIb))
+
+# BETWEEN SAMPLES FusdNLS and FusdNLS_MyoDicre
+
+O_TypeIIbFusMyo <- FindMarkers(seurat_object, ident.1 = "FusdNLS" , ident.2 = "FusdNLS_MyoDicre", group.by = "orig.ident", logfc.threshold = 0.25, verbose = TRUE, subset.ident = "0_Type IIb M")
+
+deg.filt0TypeIIb<-O_TypeIIbFusMyo %>%
+          filter(p_val_adj < 0.05)
+  
+print(head(deg.filt0TypeIIb))
+```
+
+Make a volcano plot in order to visualize the dataset. First I would have to save the list of markers as a dataframe (O_TypeIIb) and then add a column to specify whether the genes are differentially expressed (NO/Upregulated/Downregulated) based on their log2FoldChange and p value adjusted.
+
+```{r}
+#Convert it into a dataframe and then add the column to specify the differential expression
+
+O_TypeIIbFusWT_df <- as.data.frame(O_TypeIIbFusWT)
+
+O_TypeIIbFusWT_df$DE_stat <- ifelse(O_TypeIIbFusWT_df$p_val_adj < 0.05 & abs(O_TypeIIbFusWT_df$avg_log2FC) > 0.5, ifelse(O_TypeIIbFusWT_df$avg_log2FC > 0,"Upregulated","Downregulated"),"Not Significant")
+# Number of top genes to label
+top_n <- 5
+
+# Select top upregulated and downregulated genes
+top_upregulated <- O_TypeIIbFusWT_df %>%
+  filter(DE_stat == "Upregulated") %>%
+  top_n(n = top_n, wt = avg_log2FC)
+
+top_downregulated <- O_TypeIIbFusWT_df %>%
+  filter(DE_stat == "Downregulated") %>%
+  top_n(n = top_n, wt = -avg_log2FC)
+
+# Combine the top genes
+top_genes <- rbind(top_upregulated, top_downregulated)
+
+# Add labels for these top genes
+O_TypeIIbFusWT_df$label <- ifelse(rownames(O_TypeIIbFusWT_df) %in% rownames(top_genes), rownames(O_TypeIIbFusWT_df), "")
+
+#Create the volcano plot
+
+ggplot(O_TypeIIbFusWT_df, aes(x = avg_log2FC, y = -log10(p_val_adj),color = DE_stat)) +
+  geom_point() +
+  scale_color_manual(values = c("red","gray","blue"), labels = c("Downregulated","Not Significant","Upregulated")) +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "gray") +
+  geom_vline(xintercept = c(-0.5, 0.5), linetype = "dashed", color = "gray") +
+  labs(x = "log2(Fold Change)", y = "-log10(Adjusted p-value)", title = "Volcano Plot for 0_Type IIb Myonuclei cluster between samples FusdNLS and WT") +
+  theme_minimal() +
+  geom_text_repel(aes(label = label), box.padding = 0.35, point.padding = 0.3, max.overlaps = Inf)
+
+```
+
+Create the volcano plot between the FusdNLS sample and the FusdNLS_MyoDicre sample:
+
+```{r}
+O_TypeIIbFusMyo_df <- as.data.frame(O_TypeIIbFusMyo)
+
+O_TypeIIbFusMyo_df$DE_stat <- ifelse(O_TypeIIbFusMyo_df$p_val_adj < 0.05 & abs(O_TypeIIbFusMyo_df$avg_log2FC) > 0.5, ifelse(O_TypeIIbFusMyo_df$avg_log2FC > 0,"Upregulated","Downregulated"),"Not Significant")
+
+#Create the volcano plot
+
+ggplot(O_TypeIIbFusMyo_df, aes(x = avg_log2FC, y = -log10(p_val_adj),color = DE_stat)) +
+  geom_point() +
+  scale_color_manual(values = c("red","gray","blue"), labels = c("Downregulated","Not Significant","Upregulated")) +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "gray") +
+  geom_vline(xintercept = c(-0.5, 0.5), linetype = "dashed", color = "gray") +
+  labs(x = "log2(Fold Change)", y = "-log10(Adjusted p-value)", title = "Volcano Plot for 0_Type IIb Myonuclei cluster between samples FusdNLS and FusdNLS_MyoDicre") +
+  theme_minimal()
+``` 
+
+
+### 3.4.2 DGE in cluster 1_Type IIx M: 
+
+```{r}
+# BETWEEN SAMPLES FusdNLS and WT
+
+I_TypeIIxFusWT <- FindMarkers(seurat_object, ident.1 = "FusdNLS" , ident.2 = "WT", group.by = "orig.ident", logfc.threshold = 0.25, verbose = TRUE, subset.ident = "1_Type IIx M")
+
+deg.filt1TypeIIx<-I_TypeIIxFusWT %>%
+          filter(p_val_adj < 0.05)
+  
+print(head(deg.filt1TypeIIx))
+
+# BETWEEN SAMPLES FusdNLS and FusdNLS_MyoDicre
+
+I_TypeIIxFusMyo <- FindMarkers(seurat_object, ident.1 = "FusdNLS" , ident.2 = "FusdNLS_MyoDicre", group.by = "orig.ident", logfc.threshold = 0.25, verbose = TRUE, subset.ident = "1_Type IIx M")
+
+deg.filtType1IIx<-I_TypeIIxFusMyo %>%
+          filter(p_val_adj < 0.05)
+  
+print(head(deg.filtType1IIx))
+```
+
+Make the volcano plots:
+
+```{r}
+I_TypeIIxFusWT_df <- as.data.frame(I_TypeIIxFusWT)
+
+I_TypeIIxFusWT_df$DE_stat <- ifelse(I_TypeIIxFusWT_df$p_val_adj < 0.05 & abs(I_TypeIIxFusWT_df$avg_log2FC) > 0.5, ifelse(I_TypeIIxFusWT_df$avg_log2FC > 0,"Upregulated","Downregulated"),"Not Significant")
+
+# Number of top genes to label
+top_n <- 5
+
+# Select top upregulated and downregulated genes
+top_upregulated <- I_TypeIIxFusWT_df %>%
+  filter(DE_stat == "Upregulated") %>%
+  top_n(n = top_n, wt = avg_log2FC)
+
+top_downregulated <- I_TypeIIxFusWT_df %>%
+  filter(DE_stat == "Downregulated") %>%
+  top_n(n = top_n, wt = -avg_log2FC)
+
+# Combine the top genes
+top_genes <- rbind(top_upregulated, top_downregulated)
+
+# Add labels for these top genes
+I_TypeIIxFusWT_df$label <- ifelse(rownames(I_TypeIIxFusWT_df) %in% rownames(top_genes), rownames(I_TypeIIxFusWT_df), "")
+
+#Create the volcano plot
+
+ggplot(I_TypeIIxFusWT_df, aes(x = avg_log2FC, y = -log10(p_val_adj),color = DE_stat)) +
+  geom_point() +
+  scale_color_manual(values = c("red","gray","blue"), labels = c("Downregulated","Not Significant","Upregulated")) +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "gray") +
+  geom_vline(xintercept = c(-0.5, 0.5), linetype = "dashed", color = "gray") +
+  labs(x = "log2(Fold Change)", y = "-log10(Adjusted p-value)", title = "Volcano Plot for 1_Type IIx Myonuclei cluster between samples FusdNLS and Wild Type") +
+  theme_minimal() +
+  geom_text_repel(aes(label = label), box.padding = 0.35, point.padding = 0.3, max.overlaps = Inf)
+```
+
+```{r}
+I_TypeIIxFusMyo_df <- as.data.frame(I_TypeIIxFusMyo)
+
+I_TypeIIxFusMyo_df$DE_stat <- ifelse(I_TypeIIxFusMyo_df$p_val_adj < 0.05 & abs(I_TypeIIxFusMyo_df$avg_log2FC) > 0.5, ifelse(I_TypeIIxFusMyo_df$avg_log2FC > 0,"Upregulated","Downregulated"),"Not Significant")
+
+#Create the volcano plot
+
+ggplot(I_TypeIIxFusMyo_df, aes(x = avg_log2FC, y = -log10(p_val_adj),color = DE_stat)) +
+  geom_point() +
+  scale_color_manual(values = c("red","gray","blue"), labels = c("Downregulated","Not Significant","Upregulated")) +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "gray") +
+  geom_vline(xintercept = c(-0.5, 0.5), linetype = "dashed", color = "gray") +
+  labs(x = "log2(Fold Change)", y = "-log10(Adjusted p-value)", title = "Volcano Plot for 1_Type IIx Myonuclei cluster between samples FusdNLS and FusdNLS_MyoDicre") +
+  theme_minimal() 
+```
+
+### 3.4.3 DGE in cluster 2_Type IIx M:
+
+```{r}
+# BETWEEN SAMPLES FusdNLS and WT
+
+II_TypeIIxFusWT <- FindMarkers(seurat_object, ident.1 = "FusdNLS" , ident.2 = "WT", group.by = "orig.ident", logfc.threshold = 0.25, verbose = TRUE, subset.ident = "2_Type IIx M")
+
+deg.filtType2IIx<-II_TypeIIxFusWT %>%
+          filter(p_val_adj < 0.05)
+  
+print(head(deg.filtType2IIx))
+
+# BETWEEN SAMPLES FusdNLS and FusdNLS_MyoDicre
+
+II_TypeIIxFusMyo <- FindMarkers(seurat_object, ident.1 = "FusdNLS" , ident.2 = "FusdNLS_MyoDicre", group.by = "orig.ident", logfc.threshold = 0.25, verbose = TRUE, subset.ident = "2_Type IIx M")
+
+deg.filtType2IIx<-II_TypeIIxFusMyo %>%
+          filter(p_val_adj < 0.05)
+  
+print(head(deg.filtType2IIx))
+```
+
+```{r}
+II_TypeIIxFusWT_df <- as.data.frame(II_TypeIIxFusWT)
+
+II_TypeIIxFusWT_df$DE_stat <- ifelse(II_TypeIIxFusWT_df$p_val_adj < 0.05 & abs(II_TypeIIxFusWT_df$avg_log2FC) > 0.5, ifelse(II_TypeIIxFusWT_df$avg_log2FC > 0,"Upregulated","Downregulated"),"Not Significant")
+
+# Number of top genes to label
+top_n <- 5
+
+# Select top upregulated and downregulated genes
+top_upregulated <- II_TypeIIxFusWT_df %>%
+  filter(DE_stat == "Upregulated") %>%
+  top_n(n = top_n, wt = avg_log2FC)
+
+top_downregulated <- II_TypeIIxFusWT_df %>%
+  filter(DE_stat == "Downregulated") %>%
+  top_n(n = top_n, wt = -avg_log2FC)
+
+# Combine the top genes
+top_genes <- rbind(top_upregulated, top_downregulated)
+
+# Add labels for these top genes
+II_TypeIIxFusWT_df$label <- ifelse(rownames(II_TypeIIxFusWT_df) %in% rownames(top_genes), rownames(I_TypeIIxFusWT_df), "")
+
+#Create the volcano plot
+
+ggplot(II_TypeIIxFusWT_df, aes(x = avg_log2FC, y = -log10(p_val_adj),color = DE_stat)) +
+  geom_point() +
+  scale_color_manual(values = c("red","gray","blue"), labels = c("Downregulated","Not Significant","Upregulated")) +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "gray") +
+  geom_vline(xintercept = c(-0.5, 0.5), linetype = "dashed", color = "gray") +
+  labs(x = "log2(Fold Change)", y = "-log10(Adjusted p-value)", title = "Volcano Plot for 2_Type IIx Myonuclei cluster between samples FusdNLS and Wild Type") +
+  theme_minimal() +
+  geom_text_repel(aes(label = label), box.padding = 0.35, point.padding = 0.3, max.overlaps = Inf)
+```
+
+```{r}
+II_TypeIIxFusMyo_df <- as.data.frame(II_TypeIIxFusMyo)
+
+II_TypeIIxFusMyo_df$DE_stat <- ifelse(II_TypeIIxFusMyo_df$p_val_adj < 0.05 & abs(II_TypeIIxFusMyo_df$avg_log2FC) > 0.5, ifelse(II_TypeIIxFusMyo_df$avg_log2FC > 0,"Upregulated","Downregulated"),"Not Significant")
+
+#Create the volcano plot
+
+ggplot(II_TypeIIxFusMyo_df, aes(x = avg_log2FC, y = -log10(p_val_adj),color = DE_stat)) +
+  geom_point() +
+  scale_color_manual(values = c("red","gray","blue"), labels = c("Downregulated","Not Significant","Upregulated")) +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "gray") +
+  geom_vline(xintercept = c(-0.5, 0.5), linetype = "dashed", color = "gray") +
+  labs(x = "log2(Fold Change)", y = "-log10(Adjusted p-value)", title = "Volcano Plot for 2_Type IIx Myonuclei cluster between samples FusdNLS and FusdNLS_MyoDicre") +
+  theme_minimal() 
+```
+
+### 3.4.4 DGE in cluster 3_Type IIx M:
+
+```{r}
+# BETWEEN SAMPLES FusdNLS and WT
+
+III_TypeIIxFusWT <- FindMarkers(seurat_object, ident.1 = "FusdNLS" , ident.2 = "WT", group.by = "orig.ident", logfc.threshold = 0.25, verbose = TRUE, subset.ident = "3_Type IIx M")
+
+deg.filtType3IIx<-III_TypeIIxFusWT %>%
+          filter(p_val_adj < 0.05)
+  
+print(head(deg.filtType3IIx))
+
+# BETWEEN SAMPLES FusdNLS and FusdNLS_MyoDicre
+
+III_TypeIIxFusMyo <- FindMarkers(seurat_object, ident.1 = "FusdNLS" , ident.2 = "FusdNLS_MyoDicre", group.by = "orig.ident", logfc.threshold = 0.25, verbose = TRUE, subset.ident = "3_Type IIx M")
+
+deg.filtType3IIx<-III_TypeIIxFusMyo %>%
+          filter(p_val_adj < 0.05)
+  
+print(head(deg.filtType3IIx))
+```
+
+```{r}
+III_TypeIIxFusWT_df <- as.data.frame(III_TypeIIxFusWT)
+
+III_TypeIIxFusWT_df$DE_stat <- ifelse(III_TypeIIxFusWT_df$p_val_adj < 0.05 & abs(III_TypeIIxFusWT_df$avg_log2FC) > 0.5, ifelse(III_TypeIIxFusWT_df$avg_log2FC > 0,"Upregulated","Downregulated"),"Not Significant")
+
+# Number of top genes to label
+top_n <- 5
+
+# Select top upregulated and downregulated genes
+top_upregulated <- III_TypeIIxFusWT_df %>%
+  filter(DE_stat == "Upregulated") %>%
+  top_n(n = top_n, wt = avg_log2FC)
+
+top_downregulated <- III_TypeIIxFusWT_df %>%
+  filter(DE_stat == "Downregulated") %>%
+  top_n(n = top_n, wt = -avg_log2FC)
+
+# Combine the top genes
+top_genes <- rbind(top_upregulated, top_downregulated)
+
+# Add labels for these top genes
+III_TypeIIxFusWT_df$label <- ifelse(rownames(III_TypeIIxFusWT_df) %in% rownames(top_genes), rownames(III_TypeIIxFusWT_df), "")
+
+#Create the volcano plot
+
+ggplot(III_TypeIIxFusWT_df, aes(x = avg_log2FC, y = -log10(p_val_adj),color = DE_stat)) +
+  geom_point() +
+  scale_color_manual(values = c("red","gray","blue"), labels = c("Downregulated","Not Significant","Upregulated")) +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "gray") +
+  geom_vline(xintercept = c(-0.5, 0.5), linetype = "dashed", color = "gray") +
+  labs(x = "log2(Fold Change)", y = "-log10(Adjusted p-value)", title = "Volcano Plot for 3_Type IIx Myonuclei cluster between samples FusdNLS and Wild TYpe") +
+  theme_minimal() +
+  geom_text_repel(aes(label = label), box.padding = 0.35, point.padding = 0.3, max.overlaps = Inf)
+```
+```{r}
+III_TypeIIxFusMyo_df <- as.data.frame(III_TypeIIxFusMyo)
+
+III_TypeIIxFusMyo_df$DE_stat <- ifelse(III_TypeIIxFusMyo_df$p_val_adj < 0.05 & abs(III_TypeIIxFusMyo_df$avg_log2FC) > 0.5, ifelse(III_TypeIIxFusMyo_df$avg_log2FC > 0,"Upregulated","Downregulated"),"Not Significant")
+
+#Create the volcano plot
+
+ggplot(III_TypeIIxFusMyo_df, aes(x = avg_log2FC, y = -log10(p_val_adj),color = DE_stat)) +
+  geom_point() +
+  scale_color_manual(values = c("red","gray","blue"), labels = c("Downregulated","Not Significant","Upregulated")) +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "gray") +
+  geom_vline(xintercept = c(-0.5, 0.5), linetype = "dashed", color = "gray") +
+  labs(x = "log2(Fold Change)", y = "-log10(Adjusted p-value)", title = "Volcano Plot for 3_Type IIx Myonuclei cluster between samples FusdNLS and FusdNLS_MyoDicre") +
+  theme_minimal() 
+```
+
+### 3.4.5 DGE in cluster 4_Type IIb M
+
+```{r}
+# BETWEEN SAMPLES FusdNLS and WT
+
+IV_TypeIIbFusWT <- FindMarkers(seurat_object, ident.1 = "FusdNLS" , ident.2 = "WT", group.by = "orig.ident", logfc.threshold = 0.25, verbose = TRUE, subset.ident = "4_Type IIb M")
+
+deg.filtType4IIb<-IV_TypeIIbFusWT %>%
+          filter(p_val_adj < 0.05)
+  
+print(head(deg.filtType4IIb))
+
+# BETWEEN SAMPLES FusdNLS and FusdNLS_MyoDicre
+
+IV_TypeIIbFusMyo <- FindMarkers(seurat_object, ident.1 = "FusdNLS" , ident.2 = "FusdNLS_MyoDicre", group.by = "orig.ident", logfc.threshold = 0.25, verbose = TRUE, subset.ident = "4_Type IIb M")
+
+deg.filtType4IIb<-IV_TypeIIbFusMyo %>%
+          filter(p_val_adj < 0.05)
+  
+print(head(deg.filtType4IIb))
+```
+```{r}
+IV_TypeIIbFusWT_df <- as.data.frame(IV_TypeIIbFusWT)
+
+IV_TypeIIbFusWT_df$DE_stat <- ifelse(IV_TypeIIbFusWT_df$p_val_adj < 0.05 & abs(IV_TypeIIbFusWT_df$avg_log2FC) > 0.5, ifelse(IV_TypeIIbFusWT_df$avg_log2FC > 0,"Upregulated","Downregulated"),"Not Significant")
+
+# Number of top genes to label
+top_n <- 5
+
+# Select top upregulated and downregulated genes
+top_upregulated <- IV_TypeIIbFusWT_df %>%
+  filter(DE_stat == "Upregulated") %>%
+  top_n(n = top_n, wt = avg_log2FC)
+
+top_downregulated <- IV_TypeIIbFusWT_df %>%
+  filter(DE_stat == "Downregulated") %>%
+  top_n(n = top_n, wt = -avg_log2FC)
+
+# Combine the top genes
+top_genes <- rbind(top_upregulated, top_downregulated)
+
+# Add labels for these top genes
+IV_TypeIIbFusWT_df$label <- ifelse(rownames(IV_TypeIIbFusWT_df) %in% rownames(top_genes), rownames(IV_TypeIIbFusWT_df), "")
+
+#Create the volcano plot
+
+ggplot(IV_TypeIIbFusWT_df, aes(x = avg_log2FC, y = -log10(p_val_adj),color = DE_stat)) +
+  geom_point() +
+  scale_color_manual(values = c("red","gray","blue"), labels = c("Downregulated","Not Significant","Upregulated")) +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "gray") +
+  geom_vline(xintercept = c(-0.5, 0.5), linetype = "dashed", color = "gray") +
+  labs(x = "log2(Fold Change)", y = "-log10(Adjusted p-value)", title = "Volcano Plot for 4_Type IIb Myonuclei cluster between samples FusdNLS and Wild Type") +
+  theme_minimal() +
+  geom_text_repel(aes(label = label), box.padding = 0.35, point.padding = 0.3, max.overlaps = Inf)
+```
+ 
+```{r}
+IV_TypeIIbFusMyo_df <- as.data.frame(IV_TypeIIbFusMyo)
+
+IV_TypeIIbFusMyo_df$DE_stat <- ifelse(IV_TypeIIbFusMyo_df$p_val_adj < 0.05 & abs(IV_TypeIIbFusMyo_df$avg_log2FC) > 0.5, ifelse(IV_TypeIIbFusMyo_df$avg_log2FC > 0,"Upregulated","Downregulated"),"Not Significant")
+
+#Create the volcano plot
+
+ggplot(IV_TypeIIbFusMyo_df, aes(x = avg_log2FC, y = -log10(p_val_adj),color = DE_stat)) +
+  geom_point() +
+  scale_color_manual(values = c("red","gray","blue"), labels = c("Downregulated","Not Significant","Upregulated")) +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "gray") +
+  geom_vline(xintercept = c(-0.5, 0.5), linetype = "dashed", color = "gray") +
+  labs(x = "log2(Fold Change)", y = "-log10(Adjusted p-value)", title = "Volcano Plot for 4_Type IIb Myonuclei cluster between samples FusdNLS and FusdNLS_MyoDicre") +
+  theme_minimal() 
+```
+ 
+### 3.4.6 DGE in cluster 5_Type IIx M
+```{r}
+# BETWEEN SAMPLES FusdNLS and WT
+
+V_TypeIIxFusWT <- FindMarkers(seurat_object, ident.1 = "FusdNLS" , ident.2 = "WT", group.by = "orig.ident", logfc.threshold = 0.25, verbose = TRUE, subset.ident = "5_Type IIx M")
+
+deg.filtType5IIx<-V_TypeIIxFusWT %>%
+          filter(p_val_adj < 0.05)
+  
+print(head(deg.filtType5IIx))
+
+# BETWEEN SAMPLES FusdNLS and FusdNLS_MyoDicre
+
+V_TypeIIxFusMyo <- FindMarkers(seurat_object, ident.1 = "FusdNLS" , ident.2 = "FusdNLS_MyoDicre", group.by = "orig.ident", logfc.threshold = 0.25, verbose = TRUE, subset.ident = "5_Type IIx M")
+
+deg.filtType5IIx<-V_TypeIIxFusMyo %>%
+          filter(p_val_adj < 0.05)
+  
+print(head(deg.filtType5IIx))
+```
+```{r}
+V_TypeIIxFusWT_df <- as.data.frame(V_TypeIIxFusWT)
+
+V_TypeIIxFusWT_df$DE_stat <- ifelse(V_TypeIIxFusWT_df$p_val_adj < 0.05 & abs(V_TypeIIxFusWT_df$avg_log2FC) > 0.5, ifelse(V_TypeIIxFusWT_df$avg_log2FC > 0,"Upregulated","Downregulated"),"Not Significant")
+
+# Number of top genes to label
+top_n <- 5
+
+# Select top upregulated and downregulated genes
+top_upregulated <- V_TypeIIxFusWT_df %>%
+  filter(DE_stat == "Upregulated") %>%
+  top_n(n = top_n, wt = avg_log2FC)
+
+top_downregulated <- V_TypeIIxFusWT_df %>%
+  filter(DE_stat == "Downregulated") %>%
+  top_n(n = top_n, wt = -avg_log2FC)
+
+# Combine the top genes
+top_genes <- rbind(top_upregulated, top_downregulated)
+
+# Add labels for these top genes
+V_TypeIIxFusWT_df$label <- ifelse(rownames(V_TypeIIxFusWT_df) %in% rownames(top_genes), rownames(V_TypeIIxFusWT_df), "")
+
+#Create the volcano plot
+
+ggplot(V_TypeIIxFusWT_df, aes(x = avg_log2FC, y = -log10(p_val_adj),color = DE_stat)) +
+  geom_point() +
+  scale_color_manual(values = c("red","gray","blue"), labels = c("Downregulated","Not Significant","Upregulated")) +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "gray") +
+  geom_vline(xintercept = c(-0.5, 0.5), linetype = "dashed", color = "gray") +
+  labs(x = "log2(Fold Change)", y = "-log10(Adjusted p-value)", title = "Volcano Plot for 5_Type IIx Myonuclei cluster between samples FusdNLS and Wild Type") +
+  theme_minimal() +
+  geom_text_repel(aes(label = label), box.padding = 0.35, point.padding = 0.3, max.overlaps = Inf)
+```
+
+```{r}
+V_TypeIIxFusMyo_df <- as.data.frame(V_TypeIIxFusMyo)
+
+V_TypeIIxFusMyo_df$DE_stat <- ifelse(V_TypeIIxFusMyo_df$p_val_adj < 0.05 & abs(V_TypeIIxFusMyo_df$avg_log2FC) > 0.5, ifelse(V_TypeIIxFusMyo_df$avg_log2FC > 0,"Upregulated","Downregulated"),"Not Significant")
+
+#Create the volcano plot
+
+ggplot(V_TypeIIxFusMyo_df, aes(x = avg_log2FC, y = -log10(p_val_adj),color = DE_stat)) +
+  geom_point() +
+  scale_color_manual(values = c("red","gray","blue"), labels = c("Downregulated","Not Significant","Upregulated")) +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "gray") +
+  geom_vline(xintercept = c(-0.5, 0.5), linetype = "dashed", color = "gray") +
+  labs(x = "log2(Fold Change)", y = "-log10(Adjusted p-value)", title = "Volcano Plot for 5_Type IIx Myonuclei cluster between samples FusdNLS and FusdNLS_MyoDicre") +
+  theme_minimal() 
+```
+
+### 3.4.7 DGE in cluster 6_Type IIb M
+```{r}
+# BETWEEN SAMPLES FusdNLS and WT
+
+VI_TypeIIbFusWT <- FindMarkers(seurat_object, ident.1 = "FusdNLS" , ident.2 = "WT", group.by = "orig.ident", logfc.threshold = 0.25, verbose = TRUE, subset.ident = "6_Type IIb M")
+
+deg.filtType6IIb<-VI_TypeIIbFusWT %>%
+          filter(p_val_adj < 0.05)
+  
+print(head(deg.filtType6IIb))
+
+# BETWEEN SAMPLES FusdNLS and FusdNLS_MyoDicre
+
+VI_TypeIIbFusMyo <- FindMarkers(seurat_object, ident.1 = "FusdNLS" , ident.2 = "FusdNLS_MyoDicre", group.by = "orig.ident", logfc.threshold = 0.25, verbose = TRUE, subset.ident = "6_Type IIb M")
+
+deg.filtType6IIb<-VI_TypeIIbFusMyo %>%
+          filter(p_val_adj < 0.05)
+  
+print(head(deg.filtType6IIb))
+```
+
+```{r}
+VI_TypeIIbFusWT_df <- as.data.frame(VI_TypeIIbFusWT)
+
+VI_TypeIIbFusWT_df$DE_stat <- ifelse(VI_TypeIIbFusWT_df$p_val_adj < 0.05 & abs(VI_TypeIIbFusWT_df$avg_log2FC) > 0.5, ifelse(VI_TypeIIbFusWT_df$avg_log2FC > 0,"Upregulated","Downregulated"),"Not Significant")
+
+# Number of top genes to label
+top_n <- 5
+
+# Select top upregulated and downregulated genes
+top_upregulated <- VI_TypeIIbFusWT_df %>%
+  filter(DE_stat == "Upregulated") %>%
+  top_n(n = top_n, wt = avg_log2FC)
+
+top_downregulated <- VI_TypeIIbFusWT_df %>%
+  filter(DE_stat == "Downregulated") %>%
+  top_n(n = top_n, wt = -avg_log2FC)
+
+# Combine the top genes
+top_genes <- rbind(top_upregulated, top_downregulated)
+
+# Add labels for these top genes
+VI_TypeIIbFusWT_df$label <- ifelse(rownames(VI_TypeIIbFusWT_df) %in% rownames(top_genes), rownames(VI_TypeIIbFusWT_df), "")
+
+#Create the volcano plot
+
+ggplot(VI_TypeIIbFusWT_df, aes(x = avg_log2FC, y = -log10(p_val_adj),color = DE_stat)) +
+  geom_point() +
+  scale_color_manual(values = c("red","gray","blue"), labels = c("Downregulated","Not Significant","Upregulated")) +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "gray") +
+  geom_vline(xintercept = c(-0.5, 0.5), linetype = "dashed", color = "gray") +
+  labs(x = "log2(Fold Change)", y = "-log10(Adjusted p-value)", title = "Volcano Plot for 6_Type IIb Myonuclei cluster between samples FusdNLS and Wild Type") +
+  theme_minimal() +
+  geom_text_repel(aes(label = label), box.padding = 0.35, point.padding = 0.3, max.overlaps = Inf)
+```
+
+```{r}
+VI_TypeIIbFusMyo_df <- as.data.frame(VI_TypeIIbFusMyo)
+
+VI_TypeIIbFusMyo_df$DE_stat <- ifelse(VI_TypeIIbFusMyo_df$p_val_adj < 0.05 & abs(VI_TypeIIbFusMyo_df$avg_log2FC) > 0.5, ifelse(VI_TypeIIbFusMyo_df$avg_log2FC > 0,"Upregulated","Downregulated"),"Not Significant")
+
+#Create the volcano plot
+
+ggplot(VI_TypeIIbFusMyo_df, aes(x = avg_log2FC, y = -log10(p_val_adj),color = DE_stat)) +
+  geom_point() +
+  scale_color_manual(values = c("red","gray","blue"), labels = c("Downregulated","Not Significant","Upregulated")) +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "gray") +
+  geom_vline(xintercept = c(-0.5, 0.5), linetype = "dashed", color = "gray") +
+  labs(x = "log2(Fold Change)", y = "-log10(Adjusted p-value)", title = "Volcano Plot for 6_Type IIb Myonuclei cluster between samples FusdNLS and FusdNLS_MyoDicre") +
+  theme_minimal()
+```
+
+Perform the Gene Ontology analysis with EnrichGO:
+
+```{r}
+BodyMyonucleiUP <- Body_myonucleiFusWT_df %>% filter(DE_stat == "Upregulated")
+BodyMyonucleiDOWN <- Body_myonucleiFusWT_df %>% filter(DE_stat == "Downregulated")
+
+comparison <- list(rownames(BodyMyonucleiUP), rownames(BodyMyonucleiDOWN))
+names(comparison) <- c("Upregulated","Downregulated")
+
+GO <- compareCluster(geneClusters = comparison,
+                     fun = "enrichGO",
+                     OrgDb = org.Mm.eg.db,
+                     keyType = "SYMBOL",
+                     ont = "BP",
+                     universe = Body_myonucleiFusWT_df)
+dotplot(GO, showCategory = 6, font.size= 10, title = "GO Enrichment Analysis" )
+
+```
+
+```{r}
+#Gene ontology for Cluster 0
+comparison <- c(rownames(O_TypeIIbFusWT_df))
+
+GO <- enrichGO(gene =  comparison,
+              OrgDb = org.Mm.eg.db,
+              keyType = "SYMBOL",
+              ont = "BP",
+              pvalueCutoff = 0.05,
+              qvalueCutoff = 0.2)
+
+#Create the dotplot
+
+dotplot(GO, showCategory = 10) + 
+    theme_minimal() +
+    labs(title = "GO Enrichment Analysis for cluster 0_TypeIIb",
+         x = "Gene Ratio",
+         y = "GO Term",
+         color = "p.adjust") +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+```{r}
+#Gene ontology for Cluster 1
+comparison <- c(rownames(I_TypeIIxFusWT_df))
+
+GO <- enrichGO(gene = comparison,
+                OrgDb = org.Mm.eg.db,
+                keyType = "SYMBOL",
+                ont = "BP",   
+                pvalueCutoff = 0.05,
+                qvalueCutoff = 0.2)
+
+#Create the dotplot
+
+dotplot(GO, showCategory = 10) + 
+    theme_minimal() +
+    labs(title = "GO Enrichment Analysis for cluster 1_TypeIIx",
+         x = "Gene Ratio",
+         y = "GO Term",
+         color = "p.adjust") +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+
+```{r}
+#Gene ontology for Cluster 2
+comparison <- c(rownames(II_TypeIIxFusWT_df))
+
+GO <- enrichGO(gene = comparison,
+                OrgDb = org.Mm.eg.db,
+                keyType = "SYMBOL",
+                ont = "BP",   
+                pvalueCutoff = 0.05,
+                qvalueCutoff = 0.2)
+
+#Create the dotplot
+
+dotplot(GO, showCategory = 10) + 
+    theme_minimal() +
+    labs(title = "GO Enrichment Analysis for cluster 2_TypeIIx",
+         x = "Gene Ratio",
+         y = "GO Term",
+         color = "p.adjust") +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+
+```{r}
+#Gene ontology for Cluster 3
+comparison <- c(rownames(III_TypeIIxFusWT_df))
+
+GO <- enrichGO(gene = comparison,
+                OrgDb = org.Mm.eg.db,
+                keyType = "SYMBOL",
+                ont = "BP",   
+                pvalueCutoff = 0.05,
+                qvalueCutoff = 0.2)
+
+#Create the dotplot
+
+dotplot(GO, showCategory = 10) + 
+    theme_minimal() +
+    labs(title = "GO Enrichment Analysis for cluster 3_TypeIIx",
+         x = "Gene Ratio",
+         y = "GO Term",
+         color = "p.adjust") +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+
+```{r}
+#Gene ontology for Cluster 4
+comparison <- c(rownames(IV_TypeIIbFusWT_df))
+
+GO <- enrichGO(gene = comparison,
+                OrgDb = org.Mm.eg.db,
+                keyType = "SYMBOL",
+                ont = "BP",   
+                pvalueCutoff = 0.05,
+                qvalueCutoff = 0.2)
+
+#Create the dotplot
+
+dotplot(GO, showCategory = 10) + 
+    theme_minimal() +
+    labs(title = "GO Enrichment Analysis for cluster 4_TypeIIb",
+         x = "Gene Ratio",
+         y = "GO Term",
+         color = "p.adjust") +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+
+```{r}
+#Gene ontology for Cluster 5
+comparison <- c(rownames(V_TypeIIxFusWT_df))
+
+GO <- enrichGO(gene = comparison,
+                OrgDb = org.Mm.eg.db,
+                keyType = "SYMBOL",
+                ont = "BP",   
+                pvalueCutoff = 0.05,
+                qvalueCutoff = 0.2)
+
+#Create the dotplot
+
+dotplot(GO, showCategory = 10) + 
+    theme_minimal() +
+    labs(title = "GO Enrichment Analysis for cluster 5_TypeIIx",
+         x = "Gene Ratio",
+         y = "GO Term",
+         color = "p.adjust") +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+
+
+```{r}
+#Gene ontology for Cluster 6
+comparison <- c(rownames(VI_TypeIIbFusWT_df))
+
+GO <- enrichGO(gene = comparison,
+                OrgDb = org.Mm.eg.db,
+                keyType = "SYMBOL",
+                ont = "BP",   
+                pvalueCutoff = 0.05,
+                qvalueCutoff = 0.2)
+
+#Create the dotplot
+
+dotplot(GO, showCategory = 10) + 
+    theme_minimal() +
+    labs(title = "GO Enrichment Analysis for cluster 6_TypeIIb",
+         x = "Gene Ratio",
+         y = "GO Term",
+         color = "p.adjust") +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+
+
+Perform GO analysis but comparing the FusdNLS and the FusdNLS_MyoDicre samples:
+
+```{r}
+BodyMyonucleiUP <- Body_myonucleiFusMyo_df %>% filter(DE_stat == "Upregulated")
+BodyMyonucleiDOWN <- Body_myonucleiFusMyo_df %>% filter(DE_stat == "Downregulated")
+
+comparison <- list(rownames(BodyMyonucleiUP), rownames(BodyMyonucleiDOWN))
+names(comparison) <- c("Upregulated","Downregulated")
+
+GO <- compareCluster(geneClusters = comparison,
+                     fun = "enrichGO",
+                     OrgDb = org.Mm.eg.db,
+                     keyType = "SYMBOL",
+                     ont = "BP",
+                     universe = Body_myonucleiFusMyo_df)
+dotplot(GO, showCategory = 6, font.size= 10, title = "GO Enrichment Analysis for FusdNLS and FusdNLS_MyoDicre" )
+```
+
+
+
+
+
+
+
+
+
+
+
